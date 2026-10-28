@@ -1,0 +1,134 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  base-lambda - single-purpose, S3-triggered Lambda (one function per repo).
+  Fork and rename; see INSTRUCTIONS.txt.
+
+# -----------------------------------------------------------------------------
+# Environment has NO default on purpose: a forgotten value must fail loudly.
+# -----------------------------------------------------------------------------
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, qa, prod]
+    Description: Target environment (dev | qa | prod).
+
+# -----------------------------------------------------------------------------
+# Anything that varies per environment beyond simple ${Environment} substitution.
+# Example of the "shared by two environments, distinct for the third" shape:
+# SharedSet is "nonprod" for dev + qa (same AWS account) and "prod" for prod.
+# This is the pattern to use for e.g. the SES shared receipt-rule-set name.
+# -----------------------------------------------------------------------------
+Mappings:
+  EnvironmentConfig:
+    dev:
+      MemorySize: 256
+      Timeout: 30
+      LogRetentionDays: 14
+      SharedSet: nonprod
+    qa:
+      MemorySize: 256
+      Timeout: 30
+      LogRetentionDays: 14
+      SharedSet: nonprod
+    prod:
+      MemorySize: 512
+      Timeout: 60
+      LogRetentionDays: 90
+      SharedSet: prod
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Explicit RoleName on EVERY role. SAM's auto-generated names are truncated by
+  # CloudFormation to fit IAM's 64-char limit (...dev... became ...de...), which
+  # makes it impossible to scope a least-privilege deploy policy to one
+  # environment. Requires CAPABILITY_NAMED_IAM (set in samconfig.toml).
+  # Keep "<app>-<env>-role" <= 64 chars.
+  #
+  # The bucket ARN below is built with !Sub (a string), NOT !GetAtt/!Ref.
+  # Referencing the bucket here creates a cycle:
+  #   Bucket (notification) -> Function -> Role -> Bucket
+  # ---------------------------------------------------------------------------
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "base-lambda-${Environment}-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: !Sub "base-lambda-${Environment}-input-read"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "arn:${AWS::Partition}:s3:::base-lambda-${Environment}-input/*"
+
+  Function:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "base-lambda-${Environment}"
+      CodeUri: function/
+      Handler: app.lambda_handler
+      Runtime: python3.12
+      Architectures: [x86_64]
+      Role: !GetAtt FunctionRole.Arn
+      MemorySize: !FindInMap [EnvironmentConfig, !Ref Environment, MemorySize]
+      Timeout: !FindInMap [EnvironmentConfig, !Ref Environment, Timeout]
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          SHARED_SET: !FindInMap [EnvironmentConfig, !Ref Environment, SharedSet]
+          LOG_LEVEL: INFO
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/base-lambda-${Environment}"
+      RetentionInDays: !FindInMap [EnvironmentConfig, !Ref Environment, LogRetentionDays]
+
+  # SourceArn is also a !Sub string: using !Ref InputBucket here would make
+  # Permission -> Bucket, while Bucket DependsOn Permission (cycle).
+  FunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Function
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub "arn:${AWS::Partition}:s3:::base-lambda-${Environment}-input"
+
+  InputBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: FunctionInvokePermission
+    Properties:
+      BucketName: !Sub "base-lambda-${Environment}-input"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt Function.Arn
+
+Outputs:
+  FunctionName:
+    Value: !Ref Function
+  FunctionArn:
+    Value: !GetAtt Function.Arn
+  InputBucketName:
+    Value: !Ref InputBucket

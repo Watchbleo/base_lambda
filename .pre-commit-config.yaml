@@ -1,0 +1,44 @@
+# Run locally:  pip install pre-commit aws-sam-cli && pre-commit install
+# Run in CI:    .jenkins/Jenkinsfile.quality-checks (pre-commit run --all-files)
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: detect-private-key
+      - id: check-toml
+      # --unsafe: CloudFormation short-form tags (!Sub, !Ref, !GetAtt) aren't
+      # valid plain YAML; this still checks syntax.
+      - id: check-yaml
+        args: [--unsafe]
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.6
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        # False positive? Add `# pragma: allowlist secret` to the line, or
+        # generate a baseline (see INSTRUCTIONS.txt) and add:
+        #   args: [--baseline, .secrets.baseline]
+
+  - repo: local
+    hooks:
+      - id: sam-validate-lint
+        name: sam validate --lint
+        # --region is only so SAM CLI never prompts/looks one up; linting is offline.
+        entry: sam validate --lint --template-file template.yml --region us-east-1
+        language: system
+        files: ^template\.yml$
+        pass_filenames: false

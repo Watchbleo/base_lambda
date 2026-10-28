@@ -1,0 +1,160 @@
+BASE_LAMBDA - FORK CHECKLIST
+============================
+
+base_lambda is a template repo (same fork-and-customize pattern as base_pip and
+docker_django_base). ONE FUNCTION PER REPO: function/app.py + requirements.txt.
+Deploys are plain bash + AWS SAM (no Make), one Jenkins job per environment
+(dev / qa / prod), each with its own least-privilege IAM credential.
+
+Throughout, "base-lambda" is the placeholder app name and "base_lambda" the
+placeholder repo name. Pick a function name (kebab-case, e.g. waybill-archive).
+Keep "<name>-<env>-role" <= 64 characters (IAM limit).
+
+
+1. FORK AND RENAME
+------------------
+[ ] Fork/copy the repo as <function-name> (e.g. waybill-archive).
+[ ] Find every placeholder:           grep -rn "base-lambda" .
+[ ] Replace them (review the diff):   grep -rl "base-lambda" . --exclude-dir=.git \
+                                        | xargs sed -i.bak 's/base-lambda/<function-name>/g'
+                                      then delete the *.bak files
+    Places that matter:
+      template.yml      FunctionName, RoleName, PolicyName, LogGroupName,
+                        BucketName, and the two S3 ARNs (role policy +
+                        Lambda::Permission SourceArn)
+      samconfig.toml    stack_name, s3_prefix (all three stanzas)
+      deploy.sh         APP_NAME
+      .jenkins/lambda/Jenkinsfile.base-lambda
+                        credentialsId  (and rename the file, see step 4)
+[ ] Bucket convention: the S3 bucket name must be globally unique. If
+    "<name>-<env>-input" collides, add the account id or a team prefix in
+    template.yml AND in both ARN strings (they must match exactly).
+[ ] If the function is not S3-triggered, replace InputBucket,
+    FunctionInvokePermission and the role's s3:GetObject statement with the
+    right trigger/permissions. Keep the rule: any IAM policy ARN that refers to
+    a resource whose notification/trigger points at this function is built with
+    !Sub (a string), never !GetAtt/!Ref, or CloudFormation reports a circular
+    dependency.
+[ ] Replace function/app.py, function/requirements.txt, ruff-clean.
+
+2. FILL IN samconfig.toml
+-------------------------
+[ ] region: set per stanza (never in a [global] section - it doesn't apply
+    across differently-named environments).
+[ ] s3_bucket: the account's existing SAM-managed bucket for that stanza
+    (dev/qa and prod are usually different accounts -> different buckets).
+    Do NOT switch to resolve_s3 = true: SAM then checks for its own bootstrap
+    stack on every deploy, which needs IAM permissions a scoped deploy
+    credential shouldn't have.
+[ ] Do NOT add a [default] stanza. A forgotten environment must fail loudly,
+    not deploy under a bogus stack (this orphaned a stack in the original
+    waybill-archive lambda).
+[ ] Per-environment differences beyond ${Environment} go in the Mappings block
+    in template.yml (see "SharedSet": shared by dev+qa, distinct for prod).
+
+3. QUALITY CHECKS
+-----------------
+[ ] pip install pre-commit aws-sam-cli && pre-commit install
+[ ] pre-commit run --all-files    (ruff, ruff-format, detect-secrets, file
+    hygiene, sam validate --lint)
+[ ] detect-secrets false positive: add "# pragma: allowlist secret" to the
+    line, or create a baseline:
+        detect-secrets scan > .secrets.baseline
+    and add  args: [--baseline, .secrets.baseline]  to the hook in
+    .pre-commit-config.yaml.
+[ ] Jenkins: create a PR job pointing at .jenkins/Jenkinsfile.quality-checks.
+
+4. JENKINS DEPLOY JOBS (one per environment)
+--------------------------------------------
+[ ] git mv .jenkins/lambda/Jenkinsfile.base-lambda \
+           .jenkins/lambda/Jenkinsfile.<function-name>
+[ ] Create three pipeline jobs, all using that same Jenkinsfile:
+        <function-name>-dev    TARGET_ENVIRONMENT=DEV
+        <function-name>-qa     TARGET_ENVIRONMENT=QA
+        <function-name>-prod   TARGET_ENVIRONMENT=PROD
+    TARGET_ENVIRONMENT is a job-level environment variable, UPPERCASE (org
+    convention); the pipeline lowercases it and fails if it is missing/invalid.
+[ ] One least-privilege IAM credential per environment, id
+    "aws-<function-name>-<env>".
+[ ] CONFIRM THE CREDENTIAL TYPE in Jenkins ("Username with password" vs the
+    "AWS Credentials" plugin type). They are not interchangeable and a mismatch
+    only shows up as a runtime error. The Jenkinsfile has both bindings; keep
+    the one that matches.
+[ ] Jenkins agents are macOS with the stock /bin/bash 3.2 - deploy.sh is
+    written for that. Keep it that way (see "Gotchas").
+[ ] Agents need aws-sam-cli and python3 on PATH.
+
+5. IAM DEPLOY CREDENTIAL (per environment)
+------------------------------------------
+Scope every statement to ONE environment. This is why every IAM role has an
+explicit RoleName: with auto-generated names CloudFormation truncates them (the
+"dev" in the name became "de"), so a policy like
+  arn:aws:iam::<acct>:role/<name>-dev-*
+could never match.
+
+STARTING POINT ONLY - several of these are non-obvious and only fail at deploy
+time. VERIFY WITH A REAL DEPLOY of every environment; do not trust the list.
+  cloudformation:CreateChangeSet   on the stack ARN  <name>-<env>/*  AND on the
+                                   SAM transform ARN
+                                   arn:aws:cloudformation:<region>:aws:transform/Serverless-2016-10-31
+  cloudformation:DescribeChangeSet / ExecuteChangeSet / DeleteChangeSet /
+    DescribeStacks / DescribeStackEvents / GetTemplate / GetTemplateSummary
+    (stack ARN scope)
+  iam:CreateRole / DeleteRole / GetRole / PassRole / PutRolePolicy /
+    DeleteRolePolicy / GetRolePolicy / TagRole / UpdateAssumeRolePolicy
+                                   on role/<name>-<env>-*
+  iam:AttachRolePolicy / DetachRolePolicy  on role/<name>-<env>-*  (needed for
+                                   ManagedPolicyArns, e.g.
+                                   AWSLambdaBasicExecutionRole - restrict with an
+                                   iam:PolicyARN condition)
+  lambda:*Function*, lambda:AddPermission / RemovePermission, lambda:TagResource
+                                   on function:<name>-<env>
+  s3:CreateBucket / DeleteBucket / PutBucketNotification / GetBucket* /
+    PutEncryptionConfiguration / PutBucketPublicAccessBlock
+                                   on arn:aws:s3:::<name>-<env>-input
+  logs:CreateLogGroup / DeleteLogGroup / PutRetentionPolicy / DescribeLogGroups
+                                   on /aws/lambda/<name>-<env>
+  s3:GetObject / PutObject / GetBucketLocation  on the SAM-managed bucket
+    (prefix <name>-<env>/*)
+
+6. FIRST DEPLOY
+---------------
+[ ] ./deploy.sh dev       (locally: SAM_PROFILE=<profile> ./deploy.sh dev)
+[ ] Run it a second time: a no-op deploy must report SUCCESS. deploy.sh passes
+    --no-fail-on-empty-changeset; without it SAM treats "no changes" as a
+    failure and the Jenkins build goes red for a perfectly good outcome.
+[ ] Then qa, then prod, each through its own Jenkins job.
+[ ] Invalid input must fail fast:  ./deploy.sh   ./deploy.sh staging
+
+7. REGISTER WITH MAINTENANCE
+----------------------------
+[ ] Add the repo to maintenance/lambda/projects.json so the lambda category of
+    the maintenance job (OWASP dependency-check on function/requirements.txt,
+    sam build && sam validate --lint; no Trivy - Zip packaging) picks it up.
+
+
+GOTCHAS (already baked into this template - don't undo them)
+-----------------------------------------------------------
+* Explicit RoleName on every IAM role (needs CAPABILITY_NAMED_IAM, already set).
+* IAM/permission ARNs for the function's OWN S3 event-source bucket are !Sub
+  strings, not !GetAtt/!Ref (circular dependency otherwise).
+* No [default] samconfig stanza; region per stanza; explicit s3_bucket; no
+  resolve_s3.
+* deploy.sh: bash not Make; set -euo pipefail; env validated against an allow
+  list; empty-array expansion uses ${arr[@]+"${arr[@]}"} because bash 3.2
+  (macOS /bin/bash, Jenkins agents) throws "unbound variable" otherwise;
+  --no-fail-on-empty-changeset.
+* TARGET_ENVIRONMENT is UPPERCASE on the Jenkins job, lowercased in the pipeline.
+
+
+SES SHARED RULE SET (only if the function receives email via SES)
+-----------------------------------------------------------------
+SES allows exactly ONE active receipt rule set per AWS account/region. When
+environments share an account (e.g. dev + qa), they cannot each own a rule set.
+Instead:
+  * Bootstrap ONE shared rule set manually, once per account/region.
+  * Each environment's stack adds only its own AWS::SES::ReceiptRule to that
+    shared set (RuleSetName comes from the Mappings block - see "SharedSet").
+  * Do not create or activate an AWS::SES::ReceiptRuleSet in the per-env stack;
+    deleting one environment's stack must not touch the other's rules.
+  * Give each environment's rule a unique, environment-suffixed name.

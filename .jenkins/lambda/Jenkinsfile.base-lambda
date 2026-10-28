@@ -1,0 +1,71 @@
+// Deploy pipeline for ONE function. TODO(fork): rename this file to
+// Jenkinsfile.<function-name>.
+//
+// One shared pipeline, one Jenkins job PER ENVIRONMENT. Each job:
+//   - sets the job-level environment variable TARGET_ENVIRONMENT to DEV, QA or
+//     PROD (uppercase, matching this org's convention elsewhere). It is
+//     lowercased below before use, because deploy.sh / samconfig.toml use
+//     lowercase.
+//   - has its own least-privilege IAM credential (see INSTRUCTIONS.txt).
+pipeline {
+    agent any   // TODO(fork): pin to the label of the macOS agent(s) with sam + python
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        timeout(time: 30, unit: 'MINUTES')
+    }
+
+    stages {
+        stage('Resolve environment') {
+            steps {
+                script {
+                    if (!env.TARGET_ENVIRONMENT?.trim()) {
+                        error('TARGET_ENVIRONMENT is not set on this job (expected DEV, QA or PROD).')
+                    }
+                    def deployEnv = env.TARGET_ENVIRONMENT.trim().toLowerCase()
+                    if (!['dev', 'qa', 'prod'].contains(deployEnv)) {
+                        error("Invalid TARGET_ENVIRONMENT '${env.TARGET_ENVIRONMENT}' (expected DEV, QA or PROD).")
+                    }
+                    env.DEPLOY_ENV = deployEnv
+                    echo "Deploying to: ${env.DEPLOY_ENV}"
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                // CONFIRM the credential type in Jenkins before trusting either
+                // binding - the two are NOT interchangeable and a mismatch only
+                // shows up as a runtime error.
+                //   * "Username with password"  -> usernamePassword (active below)
+                //   * "AWS Credentials" (plugin) -> AmazonWebServicesCredentialsBinding
+                // TODO(fork): credential id convention "aws-<function-name>-<env>".
+                withCredentials([usernamePassword(
+                    credentialsId: "aws-base-lambda-${env.DEPLOY_ENV}",
+                    usernameVariable: 'AWS_ACCESS_KEY_ID',
+                    passwordVariable: 'AWS_SECRET_ACCESS_KEY'
+                )]) {
+                    // Single-quoted so secrets are never interpolated by Groovy.
+                    sh './deploy.sh "$DEPLOY_ENV"'
+                }
+
+                // Alternative if the credential is of type "AWS Credentials":
+                // withCredentials([[
+                //     $class: 'AmazonWebServicesCredentialsBinding',
+                //     credentialsId: "aws-base-lambda-${env.DEPLOY_ENV}",
+                //     accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+                //     secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+                // ]]) {
+                //     sh './deploy.sh "$DEPLOY_ENV"'
+                // }
+            }
+        }
+    }
+
+    post {
+        cleanup {
+            cleanWs()
+        }
+    }
+}

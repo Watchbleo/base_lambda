@@ -1,0 +1,48 @@
+// PR quality checks: ruff lint/format, detect-secrets, file hygiene,
+// sam validate --lint (all driven by .pre-commit-config.yaml so local and CI
+// behave identically). Mirrors docker_django_base's PR-quality-check pattern.
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        timeout(time: 15, unit: 'MINUTES')
+    }
+
+    environment {
+        PRE_COMMIT_HOME = "${WORKSPACE}/.pre-commit-cache"
+        // Lint is offline. Dummy values stop SAM CLI from looking for (or
+        // needing) real AWS credentials on a PR build. Never use real creds here.
+        AWS_DEFAULT_REGION    = 'us-east-1'
+        AWS_ACCESS_KEY_ID     = 'dummy'
+        AWS_SECRET_ACCESS_KEY = 'dummy'
+    }
+
+    stages {
+        stage('Setup') {
+            steps {
+                sh '''
+                    python3 -m venv .venv
+                    . .venv/bin/activate
+                    pip install --quiet --upgrade pip
+                    pip install --quiet pre-commit aws-sam-cli
+                '''
+            }
+        }
+
+        stage('Quality checks') {
+            steps {
+                sh '''
+                    . .venv/bin/activate
+                    pre-commit run --all-files --show-diff-on-failure
+                '''
+            }
+        }
+    }
+
+    post {
+        cleanup {
+            cleanWs()
+        }
+    }
+}

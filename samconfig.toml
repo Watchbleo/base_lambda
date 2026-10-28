@@ -1,0 +1,49 @@
+# One stanza per environment. There is deliberately NO [default] stanza:
+# a forgotten --config-env must fail loudly instead of deploying under a bogus
+# stack name (this is how the original waybill-archive lambda produced an
+# orphaned stack).
+#
+# region is set per stanza, NOT under [global]: global parameters don't apply
+# across differently-named environments.
+#
+# s3_bucket is explicit (the account's existing SAM-managed bucket) instead of
+# resolve_s3 = true, which makes SAM look for its own bootstrap CloudFormation
+# stack on every deploy and needs broader IAM than a scoped deploy credential
+# should have. Do NOT add resolve_s3.
+#
+# capabilities = CAPABILITY_NAMED_IAM is required because template.yml sets
+# explicit IAM RoleNames.
+#
+# TODO(fork): replace REGION / s3_bucket placeholders and the "base-lambda" names.
+
+version = 0.1
+
+[dev.deploy.parameters]
+stack_name = "base-lambda-dev"
+region = "us-east-1"
+s3_bucket = "REPLACE-ME-sam-managed-bucket"
+s3_prefix = "base-lambda-dev"
+capabilities = "CAPABILITY_NAMED_IAM"
+parameter_overrides = "Environment=dev"
+confirm_changeset = false
+fail_on_empty_changeset = false
+
+[qa.deploy.parameters]
+stack_name = "base-lambda-qa"
+region = "us-east-1"
+s3_bucket = "REPLACE-ME-sam-managed-bucket"
+s3_prefix = "base-lambda-qa"
+capabilities = "CAPABILITY_NAMED_IAM"
+parameter_overrides = "Environment=qa"
+confirm_changeset = false
+fail_on_empty_changeset = false
+
+[prod.deploy.parameters]
+stack_name = "base-lambda-prod"
+region = "us-east-1"
+s3_bucket = "REPLACE-ME-sam-managed-bucket-prod"
+s3_prefix = "base-lambda-prod"
+capabilities = "CAPABILITY_NAMED_IAM"
+parameter_overrides = "Environment=prod"
+confirm_changeset = false
+fail_on_empty_changeset = false

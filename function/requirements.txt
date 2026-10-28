@@ -1,0 +1,3 @@
+# Runtime dependencies for the function only (boto3 is provided by the Lambda
+# runtime - don't list it unless you need to pin a version).
+# This file is also what the maintenance job's OWASP dependency-check scans.
